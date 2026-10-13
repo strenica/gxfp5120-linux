@@ -1,0 +1,45 @@
+# --- secrets: never commit ---
+psk_raw32.bin
+
+# --- biometric data (captures, comparison dumps, crash logs) ---
+captures/
+state-compare/
+crashlog/
+*.cap
+
+# --- local build trees & third-party checkouts ---
+build/
+refs/
+
+# --- vendor Windows binaries/logs and machine-local outputs ---
+windows-driver/
+CHERRYSTUDIO.txt
+fps-devices.txt
+fps-reg.txt
+M0000*.bin
+Screenshot*.png
+j.sh
+JOURNAL.log
+
+# --- compiled bring-up tools (sources live next to them) ---
+bringup/cc-bg
+bringup/cc-bigread
+bringup/cc-cap
+bringup/cc-capture
+bringup/cc-drain
+bringup/cc-fing2
+bringup/cc-first-contact
+bringup/cc-imageread
+bringup/cc-init
+bringup/cc-init2
+bringup/cc-irqread
+bringup/cc-scan
+bringup/cc-sweep
+bringup/cc-tlsreplay
+bringup/cc-touch
+bringup/gxfp-match
+bringup/spi-contact
+bringup/spi-contact2
+bringup/spi-fwtest
+bringup/spi-probe
+bringup/__pycache__/

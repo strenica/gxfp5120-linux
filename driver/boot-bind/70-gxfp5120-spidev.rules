@@ -1,0 +1,3 @@
+# Bind spidev to the Goodix GXFP5120 fingerprint sensor (Intel GSPI1) so that
+# /dev/spidev0.0 exists for fprintd after every boot.
+ACTION=="add", SUBSYSTEM=="spi", ENV{MODALIAS}=="acpi:GXFP5120*", RUN+="/usr/local/sbin/gxfp5120-spidev-bind"
