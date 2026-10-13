@@ -47,6 +47,18 @@ sudo pkill -f fprintd                    # dbus re-activates fresh on demand
 pristine backup with our build. `systemctl restart fprintd` also works but
 the unit is D-Bus-activated; pkill is the simplest reliable reset.)
 
+## Runtime files + fprintd access
+
+Beyond the library itself, three things must exist on the system:
+
+- `/etc/gxfp5120/psk.bin` — the per-device PSK (see the top-level README).
+- `/etc/gxfp5120/cc90.hex` — the sensor config frame. **Device open fails without it.**
+- a fprintd **sandbox drop-in** — stock `fprintd.service` cannot open `/dev/spidev0.0`
+  or `/dev/gpiochip0` (its `DeviceAllow` list doesn't cover those device classes).
+
+`driver/boot-bind/install.sh` installs the last two (plus the boot-time spidev bind).
+Only the PSK has to be provided manually.
+
 ## Rollback
 
 ```sh

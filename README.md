@@ -42,7 +42,8 @@ Full walkthrough: `driver/README-BUILD.md`.
 1. Get the PSK (above).
 2. `driver/apply.sh build/libfprint-1.94.100` → meson/ninja build →
    `sudo meson install -C _b --no-rebuild`, `sudo ldconfig`.
-3. `sudo driver/boot-bind/install.sh` — the sensor binds to spidev on every boot.
+3. `sudo driver/boot-bind/install.sh` — spidev auto-bind at every boot, plus
+   `cc90.hex` placement and the fprintd sandbox drop-in.
 4. `sudo pam-auth-update` → enable the fingerprint profile (lock screen / sudo).
 5. `fprintd-enroll` / `fprintd-verify` (or System Settings → Users on KDE).
 
