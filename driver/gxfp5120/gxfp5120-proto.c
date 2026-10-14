@@ -488,6 +488,87 @@ static const struct sched SCHED_FINGER[] = {
     { 0.077, "a00600a6200300010086" },
 };
 
+/* ---- live-FDT mode frames ----
+ * The Windows driver derives the FDT operating parameters from the raw
+ * baselines the device reports in its fdt replies (6x raw16 LE at offset 11
+ * of the `a01400b4 36 11` frame) and re-sets the mode frames with them.
+ * params[k] = raw_le16 >> 1, carried as "80 xx" pairs. Enabled by default;
+ * set GXFP5120_LIVEFDT=0 to fall back to the frozen replay values.
+ * Frame + checksums verified against the Windows driver debug log:
+ *   header csum = (0xa0 + len_lo + len_hi) & 0xff
+ *   inner  csum = (0xaa - cmd - sum(payload after cmd)) & 0xff      (2026-10-14)
+ */
+static size_t
+build_mode_frame (char *hex, size_t hexcap, uint8_t cmd, const uint8_t sub[4],
+                  const uint8_t params[6])
+{
+    uint8_t f[32];
+    size_t n = 0;
+    uint8_t sum = 0;
+
+    f[n++] = 0xa0;
+    f[n++] = 0x12; /* len_lo: 18 payload bytes */
+    f[n++] = 0x00;
+    f[n++] = (uint8_t) (0xa0 + 0x12 + 0x00);
+
+    f[n++] = cmd;
+    for (int i = 0; i < 4; i++)
+        f[n++] = sub[i];
+    for (int k = 0; k < 6; k++) {
+        f[n++] = 0x80;
+        f[n++] = params[k];
+    }
+    for (size_t i = 5; i < n; i++) /* everything after cmd */
+        sum += f[i];
+    f[n++] = (uint8_t) (0xaa - cmd - sum);
+
+    for (size_t i = 0; i < n; i++)
+        g_snprintf (hex + i * 2, hexcap - i * 2, "%02x", f[i]);
+    return n;
+}
+
+/* returns SCHED_FINGER or a filled @buf with live-derived 34/36 frames.
+ * The derived parameters are LOCKED at the first press of the fprintd
+ * session: the raw baselines drift slightly between presses, and re-setting
+ * per press made consecutive captures image under different setpoints
+ * (same-hold frames matched at ~106 but separate presses only 2-10 --
+ * 2026-10-14). One lock per session keeps the imaging regime stable. */
+static const struct sched *
+finger_sched_live (GxDev *d, struct sched buf[3], char h34[64], char h36[64])
+{
+    static const uint8_t sub34[4] = { 0x0f, 0x00, 0x0a, 0x01 };
+    static const uint8_t sub36[4] = { 0x0f, 0x00, 0x09, 0x01 };
+    static int live = -1;
+    static gboolean locked = FALSE;
+    static uint8_t params[6];
+
+    if (live < 0) {
+        const char *env = g_getenv ("GXFP5120_LIVEFDT");
+
+        live = !(env && env[0] == '0'); /* on by default; =0 disables */
+    }
+    if (!live || !d->fdt_ok)
+        return SCHED_FINGER;
+
+    if (!locked) {
+        for (int k = 0; k < 6; k++)
+            params[k] = (uint8_t) ((d->fdt_frame[11 + 2 * k] |
+                                    (d->fdt_frame[12 + 2 * k] << 8)) >> 1);
+        locked = TRUE;
+        g_debug ("live-fdt: locked params %02x %02x %02x %02x %02x %02x",
+                 params[0], params[1], params[2], params[3], params[4],
+                 params[5]);
+    }
+
+    build_mode_frame (h34, 64, 0x34, sub34, params);
+    build_mode_frame (h36, 64, 0x36, sub36, params);
+
+    memcpy (buf, SCHED_FINGER, sizeof (SCHED_FINGER));
+    buf[0].hex = h34;
+    buf[1].hex = h36;
+    return buf;
+}
+
 #define GX_MAX_PARCELS 400
 #define GX_IMG_HEAD_LEN 4
 
@@ -587,9 +668,15 @@ out:
 gboolean
 gx_dev_capture_image (GxDev *d, uint8_t content[GX_IMG_CONTENT_LEN], GError **error)
 {
+    struct sched live[3];
+    char h34[64], h36[64];
+    const struct sched *sch;
+
     g_usleep (80000);
 
-    if (capture_run (d, SCHED_FINGER, G_N_ELEMENTS (SCHED_FINGER), 4.0,
+    sch = finger_sched_live (d, live, h34, h36);
+
+    if (capture_run (d, sch, G_N_ELEMENTS (SCHED_FINGER), 4.0,
                      content, error))
         return TRUE;
 
@@ -600,7 +687,7 @@ gx_dev_capture_image (GxDev *d, uint8_t content[GX_IMG_CONTENT_LEN], GError **er
     g_clear_error (error);
     if (!gx_dev_ensure_mounted (d, error))
         return FALSE;
-    if (capture_run (d, SCHED_FINGER, G_N_ELEMENTS (SCHED_FINGER), 4.0,
+    if (capture_run (d, sch, G_N_ELEMENTS (SCHED_FINGER), 4.0,
                      content, error))
         return TRUE;
     return FALSE;
@@ -608,56 +695,102 @@ gx_dev_capture_image (GxDev *d, uint8_t content[GX_IMG_CONTENT_LEN], GError **er
 
 /* ---- features ---- */
 
-gboolean
-gx_dev_capture_features (GxDev *d, void **out_features, GError **error)
+/* One capture attempt: capture + decode + quality gates + feature
+ * extraction. On failure @error is set and the attempt is retryable. */
+static gboolean
+capture_features_once (GxDev *d, const char *tag, void **out, GError **error)
 {
+    uint8_t content[GX_IMG_CONTENT_LEN];
     double img[GX_IMG_W * GX_IMG_H];
+    double std, mn;
 
+    if (!gx_dev_capture_image (d, content, error))
+        return FALSE;
+
+    gx_img_decode_content (content, img);
+
+    std = gx_img_std (img, GX_IMG_W * GX_IMG_H);
+    mn = gx_img_min (img, GX_IMG_W * GX_IMG_H);
+
+    g_debug ("capture%s: raw std %.1f min %.0f", tag, std, mn);
+
+    if (mn > GX_NOFINGER_MIN) {
+        /* sensor returned a no-contact / mid-transition frame instead of
+         * the finger; the caller re-captures while the finger is held */
+        g_debug ("capture%s rejected: no finger in frame (min %.0f)", tag, mn);
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                     "no finger in frame");
+        return FALSE;
+    }
+
+    if (std < GX_GATE_STD) {
+        g_debug ("capture%s rejected: contrast %.1f (no finger?)", tag, std);
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "low contrast");
+        return FALSE;
+    }
+
+    gx_img_deband (img, GX_IMG_W, GX_IMG_H);
+
+    int w, h;
+    double *up = gx_img_upscale (img, GX_IMG_W, GX_IMG_H, GX_UPSCALE, &w, &h);
+    GxSiftFeatures *f = gx_sift_extract (up, w, h);
+    g_free (up);
+
+    if (!f || gx_sift_keypoints (f) < GX_MIN_KEYPOINTS) {
+        g_debug ("capture%s rejected: %u keypoints", tag,
+                 f ? gx_sift_keypoints (f) : 0);
+        gx_sift_free (f);
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "few keypoints");
+        return FALSE;
+    }
+
+    *out = f;
+    return TRUE;
+}
+
+/* Capture one press into up to two feature sets from the same hold. The
+ * second frame is a bonus: it stays NULL if it failed any quality gate.
+ * Callers take the better match of the two, which removes most of the
+ * per-press capture-quality luck (2026-10-14). */
+gboolean
+gx_dev_capture_features (GxDev *d, void **out_a, void **out_b, GError **error)
+{
     for (int attempt = 0; attempt < 3; attempt++) {
-        uint8_t content[GX_IMG_CONTENT_LEN];
+        g_autoptr(GError) aerr = NULL;
 
         if (check_cancel (d, error))
             return FALSE;
         if (!gx_dev_ensure_mounted (d, error))
             return FALSE;
-        if (!gx_dev_wait_finger (d, error))
-            return FALSE;
-        if (!gx_dev_capture_image (d, content, error))
-            return FALSE;
-
-        gx_img_decode_content (content, img);
-
-        g_debug ("capture: raw std %.1f", gx_img_std (img, GX_IMG_W * GX_IMG_H));
-
-        if (gx_img_std (img, GX_IMG_W * GX_IMG_H) < GX_GATE_STD) {
-            g_debug ("capture rejected: contrast %.1f (no finger?)",
-                     gx_img_std (img, GX_IMG_W * GX_IMG_H));
+        if (attempt == 0) {
+            if (!gx_dev_wait_finger (d, error))
+                return FALSE;
+            g_usleep (350000); /* let the contact settle after finger detect */
+        } else {
             g_usleep (300000);
-            continue;
         }
+        if (capture_features_once (d, "", out_a, &aerr))
+            break;
 
-        gx_img_deband (img, GX_IMG_W, GX_IMG_H);
-
-        int w, h;
-        double *up = gx_img_upscale (img, GX_IMG_W, GX_IMG_H, GX_UPSCALE, &w, &h);
-        GxSiftFeatures *f = gx_sift_extract (up, w, h);
-        g_free (up);
-
-        if (!f || gx_sift_keypoints (f) < GX_MIN_KEYPOINTS) {
-            g_debug ("capture rejected: %u keypoints",
-                     f ? gx_sift_keypoints (f) : 0);
-            gx_sift_free (f);
-            g_usleep (300000);
-            continue;
+        if (attempt == 2) {
+            g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                         "no usable fingerprint capture (%s)",
+                         aerr ? aerr->message : "unknown");
+            return FALSE;
         }
-
-        *out_features = f;
-        return TRUE;
     }
 
-    g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                 "no usable fingerprint capture");
-    return FALSE;
+    /* bonus second frame from the same hold */
+    *out_b = NULL;
+    {
+        g_autoptr(GError) berr = NULL;
+
+        g_usleep (150000);
+        if (!capture_features_once (d, " (2nd)", out_b, &berr))
+            g_debug ("second capture unavailable: %s", berr->message);
+    }
+
+    return TRUE;
 }
 
 void

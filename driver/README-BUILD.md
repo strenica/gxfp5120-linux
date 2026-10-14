@@ -9,7 +9,7 @@ same base the mb13 GXFP51A0 driver pins).
 ## Deps (once)
 
 ```sh
-sudo apt-get install -y meson ninja-build libgusb-dev libpixman-1-dev
+sudo apt-get install -y meson ninja-build libgusb-dev libpixman-1-dev libgudev-1.0-dev
 ```
 
 ## Build

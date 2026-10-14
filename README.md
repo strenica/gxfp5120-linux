@@ -17,12 +17,15 @@ KDE Plasma 6.3 against libfprint v1.94.100 (patched) and fprintd 1.94.5.
   controller bridges it. Userspace talks to it through `/dev/spidev0.0` (mode 0,
   10 MHz) with one GPIO pulse (`gpio17`) per response parcel.
 - **Session** — TLS 1.2 pre-shared-key handshake per session, then the driver replays
-  the Windows driver's per-press choreography (arm → finger-mode → image).
+  the Windows driver's per-press choreography (arm → finger-mode → image), with the
+  sensor's FDT operating parameters **read live from the device** and locked per
+  session (mirrors the Windows driver's calibration loop).
 - **Images** — 12-bit 80×64 frames → 6→4 nibble decode → 80×61 display → row/column
   median deband → ×2 bilinear (160×122).
 - **Matching** — SigFM (FAST-9 corners + unsteered BRIEF-256 + RANSAC rigid transform),
-  ported from the mb13-godsquantum GXFP51A0 driver. Acceptance: score ≥ 40 **and**
-  raster ZNCC ≥ 300.
+  ported from the mb13-godsquantum GXFP51A0 driver. Two frames are captured per press
+  and scored against all enrolled views; the better match is kept. Acceptance:
+  score ≥ 40 **and** raster ZNCC ≥ 200 (wrong-finger probes stay ≤ 6).
 - **Delivery** — a libfprint `FPI` driver (`gxfp5120`) integrated via `driver/apply.sh`,
   plus a udev rule (`driver/boot-bind/`) binding `spidev` to the sensor on every boot.
 

@@ -22,9 +22,18 @@
 #define GX_IMG_CONTENT_LEN 7688
 #define GX_UPSCALE 2
 #define GX_MATCH_THRESHOLD 40 /* in-session separation: genuine 61+, other finger <=37 */
-#define GX_ZNCC_FLOOR 300  /* raster ZNCC sanity floor (junk-capture reject) */
-#define GX_ENROLL_MIN_MATCH 10 /* a new view must match some prior view this well */
-#define GX_ENROLL_STAGES 5
+/* raster ZNCC sanity floor. 2026-10-14 data: real-world genuine presses land
+ * at score 33-50 with zncc 200-480 (one press rejected at 45/289), while
+ * cross-finger probes stayed <=5/151 -- 300 was cutting through genuine */
+#define GX_ZNCC_FLOOR 200
+#define GX_ENROLL_MIN_PAIR 20 /* refuse enrollments whose views never even
+                               * cross-match this much (featureless captures) */
+/* display-domain pixel minimum separating no-contact/mid-transition frames
+ * (min >= ~1830) from real finger frames (min <= ~880) — measured across
+ * 200+ captures 2026-10-14; frames above this get re-captured */
+#define GX_NOFINGER_MIN 1200.0
+#define GX_ENROLL_MIN_MATCH 10 /* logging bar for stage-vs-prior-view scores (not enforced) */
+#define GX_ENROLL_STAGES 10
 
 /* ---- transport ---- */
 
@@ -81,6 +90,7 @@ gboolean gx_tls_load_session (GxTls *t, const char *path);
 void         gx_img_decode_content (const uint8_t content[GX_IMG_CONTENT_LEN],
                                     double *out /* GX_IMG_W*GX_IMG_H */);
 double       gx_img_std (const double *img, int n);
+double       gx_img_min (const double *img, int n);
 void         gx_img_deband (double *img, int w, int h);
 double      *gx_img_upscale (const double *img, int w, int h, int scale,
                              int *out_w, int *out_h);
@@ -121,7 +131,9 @@ gboolean gx_dev_capture_image (GxDev *d, uint8_t content[GX_IMG_CONTENT_LEN],
                                GError **error);
 
 /* shared helpers (proto) */
-gboolean gx_dev_capture_features (GxDev *d, void **out_features /* GxSiftFeatures */,
+/* captures one press into up to two feature sets (the second comes from the
+ * same hold and may be NULL); callers pick the better of the two */
+gboolean gx_dev_capture_features (GxDev *d, void **out_a, void **out_b,
                                   GError **error);
 void     gx_dev_free_features (void *features);
 int      gx_dev_match_features (void *probe, void *enrolled);

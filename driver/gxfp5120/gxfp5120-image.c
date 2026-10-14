@@ -48,6 +48,17 @@ gx_img_std (const double *img, int n)
     return sqrt (v / n);
 }
 
+double
+gx_img_min (const double *img, int n)
+{
+    double m = img[0];
+
+    for (int i = 1; i < n; i++)
+        if (img[i] < m)
+            m = img[i];
+    return m;
+}
+
 static int
 cmp_dbl (const void *a, const void *b)
 {

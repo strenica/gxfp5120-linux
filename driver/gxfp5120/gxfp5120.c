@@ -171,12 +171,22 @@ enroll_stage_thread_func (GTask *task, gpointer source, gpointer task_data,
 {
   FpiDeviceGxfp5120 *self = FPI_DEVICE_GXFP5120 (source);
   g_autoptr(GError) error = NULL;
-  void *feat = NULL;
+  void *feat = NULL, *feat2 = NULL;
+  GPtrArray *pair;
 
-  if (!gx_dev_capture_features (&self->dev, &feat, &error))
-    g_task_return_error (task, g_steal_pointer (&error));
-  else
-    g_task_return_pointer (task, feat, NULL);
+  if (!gx_dev_capture_features (&self->dev, &feat, &feat2, &error))
+    {
+      g_task_return_error (task, g_steal_pointer (&error));
+      return;
+    }
+
+  /* transfer container only: enroll_stage_done moves the features into the
+   * print's views array, which owns and frees them */
+  pair = g_ptr_array_new ();
+  g_ptr_array_add (pair, feat);
+  if (feat2)
+    g_ptr_array_add (pair, feat2);
+  g_task_return_pointer (task, pair, (GDestroyNotify) g_ptr_array_unref);
 }
 
 static void gx_enroll_launch_stage (FpDevice *dev);
@@ -189,7 +199,8 @@ enroll_stage_done (GObject *source, GAsyncResult *res, gpointer user_data)
   g_autoptr(GError) error = NULL;
   FpPrint *print = NULL;
   g_autoptr(GPtrArray) views = NULL;
-  GxSiftFeatures *feat = g_task_propagate_pointer (G_TASK (res), &error);
+  g_autoptr(GPtrArray) pair = g_task_propagate_pointer (G_TASK (res), &error);
+  GxSiftFeatures *feat = NULL;
 
   if (error)
     {
@@ -206,6 +217,7 @@ enroll_stage_done (GObject *source, GAsyncResult *res, gpointer user_data)
       return;
     }
 
+  feat = g_ptr_array_index (pair, 0);
   fpi_device_get_enroll_data (dev, &print);
   fpi_print_set_type (print, FPI_PRINT_RAW);
   fpi_print_set_device_stored (print, FALSE);
@@ -229,6 +241,8 @@ enroll_stage_done (GObject *source, GAsyncResult *res, gpointer user_data)
 
     }
   g_ptr_array_add (views, feat);
+  if (pair->len > 1)
+    g_ptr_array_add (views, g_ptr_array_index (pair, 1));
 
   /* floating variant; g_object_set consumes the ref (see fp-print.c) */
   g_object_set (print, "fpi-data", views_to_variant (views), NULL);
@@ -242,7 +256,31 @@ enroll_stage_done (GObject *source, GAsyncResult *res, gpointer user_data)
   if (self->enroll_stage < GX_ENROLL_STAGES)
     gx_enroll_launch_stage (dev);
   else
-    fpi_device_enroll_complete (dev, g_object_ref (print), NULL);
+    {
+      /* sanity gate: an enrollment whose views never cross-match (featureless
+       * captures) can never be matched later; refuse it with an actionable
+       * error instead of silently storing a dead print (2026-10-14) */
+      int best_pair = 0;
+
+      for (guint i = 0; i < views->len; i++)
+        for (guint j = i + 1; j < views->len; j++)
+          {
+            int s = gx_dev_match_features (g_ptr_array_index (views, i),
+                                           g_ptr_array_index (views, j));
+
+            if (s > best_pair)
+              best_pair = s;
+          }
+      fp_info ("enroll: view consistency: best pair %d (floor %d)",
+               best_pair, GX_ENROLL_MIN_PAIR);
+      if (best_pair < GX_ENROLL_MIN_PAIR)
+        fpi_device_enroll_complete (dev, NULL,
+            fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID,
+                "captures too inconsistent (best pair %d) - clean the sensor "
+                "and the finger, press calmly and retry", best_pair));
+      else
+        fpi_device_enroll_complete (dev, g_object_ref (print), NULL);
+    }
 }
 
 static void
@@ -333,20 +371,36 @@ verify_thread_func (GTask *task, gpointer source, gpointer task_data,
   VerifyData *vd = task_data;
   g_autoptr(GError) error = NULL;
   g_autoptr(GPtrArray) views = NULL;
-  void *feat = NULL;
-  int best = 0;
+  void *feat = NULL, *feat2 = NULL;
+  int best = 0, zncc = 0;
 
-  if (!gx_dev_capture_features (&self->dev, &feat, &error))
+  if (!gx_dev_capture_features (&self->dev, &feat, &feat2, &error))
     {
       g_task_return_error (task, g_steal_pointer (&error));
       return;
     }
 
   views = views_from_print (vd->print);
-  best = gx_score_probe ("verify", feat, views, &vd->zncc);
+  best = gx_score_probe ("verify", feat, views, &zncc);
+  if (feat2)
+    {
+      int z2 = 0;
+      int b2 = gx_score_probe ("verify (2nd)", feat2, views, &z2);
+      gboolean pass1 = best >= GX_MATCH_THRESHOLD && zncc >= GX_ZNCC_FLOOR;
+      gboolean pass2 = b2 >= GX_MATCH_THRESHOLD && z2 >= GX_ZNCC_FLOOR;
+
+      /* prefer a gate-passing probe; otherwise the higher score */
+      if ((pass2 && !pass1) || (pass2 == pass1 && b2 > best))
+        {
+          best = b2;
+          zncc = z2;
+        }
+    }
   gx_dev_free_features (feat);
+  gx_dev_free_features (feat2);
 
   vd->best = best;
+  vd->zncc = zncc;
   g_task_return_boolean (task, TRUE);
 }
 
@@ -418,32 +472,46 @@ identify_thread_func (GTask *task, gpointer source, gpointer task_data,
   FpiDeviceGxfp5120 *self = FPI_DEVICE_GXFP5120 (source);
   IdentifyData *id = task_data;
   g_autoptr(GError) error = NULL;
-  void *feat = NULL;
+  void *feat = NULL, *feat2 = NULL;
+  void *probes[2];
+  int pi;
   guint i;
 
-  if (!gx_dev_capture_features (&self->dev, &feat, &error))
+  if (!gx_dev_capture_features (&self->dev, &feat, &feat2, &error))
     {
       g_task_return_error (task, g_steal_pointer (&error));
       return;
     }
 
+  probes[0] = feat;
+  probes[1] = feat2;
   id->best = 0;
   id->match = NULL;
-  for (i = 0; i < id->prints->len; i++)
+  for (pi = 0; pi < 2; pi++)
     {
-      FpPrint *p = g_ptr_array_index (id->prints, i);
-      g_autoptr(GPtrArray) views = views_from_print (p);
-      int z = 0;
-      int best = gx_score_probe ("identify", feat, views, &z);
-
-      if (best > id->best)
+      if (!probes[pi])
+        continue;
+      for (i = 0; i < id->prints->len; i++)
         {
-          id->best = best;
-          id->zncc = z;
-          id->match = p;
+          FpPrint *p = g_ptr_array_index (id->prints, i);
+          g_autoptr(GPtrArray) views = views_from_print (p);
+          int z = 0;
+          int best = gx_score_probe ("identify", probes[pi], views, &z);
+          gboolean pass = best >= GX_MATCH_THRESHOLD && z >= GX_ZNCC_FLOOR;
+          gboolean have = id->best >= GX_MATCH_THRESHOLD &&
+                          id->zncc >= GX_ZNCC_FLOOR;
+
+          /* prefer any gate-passing probe; otherwise the higher score */
+          if ((pass && !have) || (pass == have && best > id->best))
+            {
+              id->best = best;
+              id->zncc = z;
+              id->match = p;
+            }
         }
     }
   gx_dev_free_features (feat);
+  gx_dev_free_features (feat2);
   g_task_return_boolean (task, TRUE);
 }
 
