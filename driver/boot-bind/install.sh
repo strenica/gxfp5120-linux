@@ -18,8 +18,9 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 install -m 0755 "$here/gxfp5120-spidev-bind.sh" /usr/local/sbin/gxfp5120-spidev-bind
 install -m 0644 "$here/70-gxfp5120-spidev.rules" /etc/udev/rules.d/70-gxfp5120-spidev.rules
 
-# runtime files: sensor config frame + fprintd sandbox drop-in
+# runtime files: sensor config frame + state dir + fprintd sandbox drop-in
 install -D -m 0644 "$here/../gxfp5120/cc90.hex" /etc/gxfp5120/cc90.hex
+install -d -m 0755 /var/lib/gxfp5120        # TLS session cache
 install -D -m 0644 "$here/fprintd-gxfp5120.conf" \
     /etc/systemd/system/fprintd.service.d/gxfp5120.conf
 systemctl daemon-reload

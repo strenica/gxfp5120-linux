@@ -219,7 +219,8 @@ enroll_stage_done (GObject *source, GAsyncResult *res, gpointer user_data)
 
   feat = g_ptr_array_index (pair, 0);
   fpi_device_get_enroll_data (dev, &print);
-  fpi_print_set_type (print, FPI_PRINT_RAW);
+  if (fpi_print_get_type (print) == FPI_PRINT_UNDEFINED)
+    fpi_print_set_type (print, FPI_PRINT_RAW);
   fpi_print_set_device_stored (print, FALSE);
   views = views_from_print (print);
   if (views->len > 0)

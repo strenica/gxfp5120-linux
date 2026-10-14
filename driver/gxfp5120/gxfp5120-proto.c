@@ -14,7 +14,9 @@
 
 /* Primary path is the fprintd StateDirectory (writable inside the service
  * sandbox; /tmp is private there). Fallback keeps manual-run compatibility. */
-#define GX_SESSION_FILE "/var/lib/fprint/gxfp5120-session.txt"
+/* TLS session cache. Kept OUT of /var/lib/fprint: fprintd scans that
+ * directory for per-user subdirs and probed the file as a username. */
+#define GX_SESSION_FILE "/var/lib/gxfp5120/tls-session.txt"
 #define GX_SESSION_FILE_ALT "/tmp/gxfp-session.txt"
 #define GX_FDT_FRAME_HEX "a01200b2360f000901b0b0c0c0a7a7b9b9aeaebebee3"
 #define GX_FDT_FINGER_MEAN 0x120
